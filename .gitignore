@@ -6,6 +6,7 @@ __pycache__/
 
 # C extensions
 *.so
+*.json
 
 # Distribution / packaging
 .Python
@@ -228,4 +229,3 @@ __marimo__/
 pyvenv.cfg
 .venv
 pip-selfcheck.json
-config.json

@@ -1,4 +1,3 @@
-
 from PyQt6.QtCore import Qt
 import subprocess
 import json
@@ -8,11 +7,12 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QMessageBox, QScrollArea, QSpacerItem
 )
 from PyQt6.QtCore import (
-    QSize, QCoreApplication, QEvent, QTimer, QPoint
+    QSize, QCoreApplication, QEvent, QTimer, QPoint, QThread, pyqtSignal
 )
 from PyQt6.QtGui import (
     QFont, QIcon
 )
+
 
 import sys
 import os
@@ -68,6 +68,10 @@ class YtDlpWrapper(QWidget):
         self.download_btn = QPushButton("Download")
         self.download_btn.clicked.connect(self.download_video)
 
+        # add a check box "only audio" next to download button
+        self.only_audio_checkbox = QPushButton("Only Audio")
+        self.only_audio_checkbox.setCheckable(True)
+
         self.output_box = QTextEdit()
         self.output_box.setReadOnly(True)
         self.output_box.setPlaceholderText("Output log...")
@@ -83,10 +87,11 @@ class YtDlpWrapper(QWidget):
         folder_layout.addWidget(self.folder_btn)
 
         layout = QVBoxLayout()
-        layout.addWidget(self.url_label)
-        layout.addWidget(self.url_input)
         layout.addWidget(self.folder_label)
         layout.addLayout(folder_layout)
+        layout.addWidget(self.url_label)
+        layout.addWidget(self.url_input)
+        layout.addWidget(self.only_audio_checkbox)
         layout.addWidget(self.download_btn)
         layout.addWidget(self.output_box)
 
@@ -166,10 +171,60 @@ class YtDlpWrapper(QWidget):
     #           Recent folders panel methods                         #
     # =============================================================== #
     def download_video(self):
+        url = self.url_input.text().strip()
         folder = self.folder_input.text().strip()
-        if folder:
-            self.add_recent_folder(folder)
-            self.save_config()
+
+        if not url:
+            self.log_output("❌ Please enter a YouTube link.")
+            return
+        if not folder:
+            self.log_output("❌ Please select a download folder.")
+            return
+
+        # Add recent folder and save immediately so it's remembered
+        self.add_recent_folder(folder)
+        self.save_config()
+
+        # Build the yt-dlp command
+        if self.only_audio_checkbox.isChecked():
+            command = [
+                "yt-dlp",
+                "-x", "--audio-format", "mp3",
+                "--embed-thumbnail",
+                "--add-metadata",
+                "--metadata-from-title", "%(title)s",
+                "--parse-metadata", "title:%(title)s",
+                "--parse-metadata", "uploader:%(artist)s",
+                "-o", os.path.join(folder, "%(title)s.%(ext)s"),
+                url
+            ]
+        else:
+            command = [
+                "yt-dlp",
+                "-f", "bestvideo+bestaudio/best",
+                "--embed-thumbnail",
+                "--add-metadata",
+                "--metadata-from-title", "%(title)s",
+                "--parse-metadata", "title:%(title)s",
+                "--parse-metadata", "uploader:%(artist)s",
+                "-o", os.path.join(folder, "%(title)s.%(ext)s"),
+                url
+            ]
+
+        # Disable controls while downloading
+        self.download_btn.setEnabled(False)
+        self.folder_btn.setEnabled(False)
+        self.url_input.setEnabled(False)
+        self.folder_input.setEnabled(False)
+        self.only_audio_checkbox.setEnabled(False)
+
+        self.log_output(f"▶ Starting download: {url}\n")
+
+        # Start worker thread to run yt-dlp and stream output
+        self.worker = DownloadWorker(command)
+        self.worker.line.connect(self.log_output)
+        self.worker.finished.connect(self.on_download_finished)
+        self.worker.start()
     # =============================================================== #
     #           Recent folders panel methods                         #
     # =============================================================== #
@@ -205,49 +260,59 @@ class YtDlpWrapper(QWidget):
     def log_output(self, text):
         self.output_box.append(text)
         self.output_box.ensureCursorVisible()
-    
-    # =============================================================== #
-    #           Recent folders panel methods                         #
-    # =============================================================== #
-    def download_video(self):
-        url = self.url_input.text().strip()
-        folder = self.folder_input.text().strip()
 
-        if not url:
-            self.log_output("❌ Please enter a YouTube link.")
+    def on_download_finished(self, returncode: int):
+        if returncode == 0:
+            self.log_output("\n✅ Done!")
+        else:
+            self.log_output("\n❌ Error during download.")
+
+        # Re-enable controls
+        self.download_btn.setEnabled(True)
+        self.folder_btn.setEnabled(True)
+        self.url_input.setEnabled(True)
+        self.folder_input.setEnabled(True)
+        self.only_audio_checkbox.setEnabled(True)
+
+        # Optionally clean up worker reference
+        try:
+            self.worker.deleteLater()
+        except Exception:
+            pass
+        self.worker = None
+
+
+# =============================================================== #
+#           Download Worker Class                                 #
+# =============================================================== #
+class DownloadWorker(QThread):
+    line = pyqtSignal(str)
+    finished = pyqtSignal(int)
+
+    def __init__(self, command, parent=None):
+        super().__init__(parent)
+        self.command = command
+
+    def run(self):
+        try:
+            proc = subprocess.Popen(
+                self.command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,      # Python 3.7+: use text=True instead of universal_newlines
+                bufsize=1
+            )
+        except Exception as e:
+            self.line.emit(f"❌ Failed to start process: {e}")
+            self.finished.emit(1)
             return
-        if not folder:
-            self.log_output("❌ Please select a download folder.")
-            return
 
-        command = [
-            "yt-dlp",
-            "-x", "--audio-format", "mp3",
-            "--embed-thumbnail",
-            "--add-metadata",
-            "--metadata-from-title", "%(title)s",
-            "--parse-metadata", "title:%(title)s",
-            "--parse-metadata", "uploader:%(artist)s",
-            "-o", os.path.join(folder, "%(title)s.%(ext)s"),
-            url
-        ]
+        # Stream lines and emit them to the GUI thread
+        for line in proc.stdout:
+            self.line.emit(line.rstrip())
 
-        self.log_output(f"▶ Starting download: {url}\n")
-
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-        )
-
-        for line in process.stdout:
-            self.log_output(line.strip())
-
-        process.wait()
-        self.log_output("\n✅ Done!" if process.returncode ==
-                        0 else "\n❌ Error during download.")
-
+        proc.wait()
+        self.finished.emit(proc.returncode if proc is not None else 1)
 
 # =============================================================== #
 #           Application entry point                               #
